@@ -1,0 +1,329 @@
+from typing import List, Optional, Tuple, Any
+import textwrap
+
+try:
+    # python-escpos printer (USB)
+    from escpos.printer import Usb
+    try:
+        # Windows-only raw printing via spooler (avoids libusb requirements)
+        from escpos.printer import Win32Raw  # type: ignore
+    except Exception:
+        Win32Raw = None  # type: ignore
+except Exception as import_error:  # pragma: no cover
+    raise SystemExit(
+        "python-escpos is required. Install with 'pip install python-escpos pyusb'\n"
+        f"Import error: {import_error}"
+    )
+
+try:
+    # PyUSB for device discovery
+    import usb.core  # type: ignore
+    import usb.util  # type: ignore
+except Exception as import_error:  # pragma: no cover
+    raise SystemExit(
+        "pyusb is required for USB auto-discovery. Install with 'pip install pyusb'\n"
+        f"Import error: {import_error}"
+    )
+
+
+# Optional explicit profile; set to None to use library default (recommended)
+PRINTER_PROFILE: Optional[str] = None
+
+
+def _prompt_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
+def _get_string_safely(device, index: int) -> str:
+    if not index:
+        return ""
+    try:
+        return usb.util.get_string(device, index) or ""
+    except Exception:
+        return ""
+
+
+def _is_printer_device(device) -> bool:
+    # USB class 7 is Printer
+    if getattr(device, "bDeviceClass", None) == 7:
+        return True
+    try:
+        for cfg in device:
+            for intf in cfg:
+                if intf.bInterfaceClass == 7:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def discover_usb_printers() -> List[Tuple[int, int, str, str]]:
+    devices = []
+    try:
+        for dev in usb.core.find(find_all=True):  # type: ignore[attr-defined]
+            if _is_printer_device(dev):
+                id_vendor = int(dev.idVendor)
+                id_product = int(dev.idProduct)
+                manufacturer = _get_string_safely(dev, getattr(dev, "iManufacturer", 0))
+                product = _get_string_safely(dev, getattr(dev, "iProduct", 0))
+                devices.append((id_vendor, id_product, manufacturer, product))
+    except Exception:
+        return []
+    return devices
+
+
+def discover_windows_printers() -> List[str]:
+    try:
+        import win32print  # type: ignore
+    except Exception:
+        return []
+
+    flags = (
+        getattr(win32print, "PRINTER_ENUM_LOCAL", 2)
+        | getattr(win32print, "PRINTER_ENUM_CONNECTIONS", 4)
+    )
+
+    try:
+        printers = win32print.EnumPrinters(flags)
+    except Exception:
+        return []
+
+    names: List[str] = []
+    for entry in printers:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 3:
+            name = entry[2]
+            if isinstance(name, str):
+                names.append(name)
+    # Deduplicate while preserving order
+    seen = set()
+    unique_names = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique_names.append(n)
+    return unique_names
+
+
+def _prompt_select_windows_printer(names: List[str]) -> Optional[str]:
+    if not names:
+        return None
+    if len(names) == 1:
+        print(f"Using Windows printer: {names[0]}")
+        return names[0]
+    print("Select a Windows printer:")
+    for idx, name in enumerate(names, start=1):
+        print(f"  {idx}. {name}")
+    while True:
+        sel = _prompt_input("Select a printer by number (or press Enter to cancel): ").strip()
+        if not sel:
+            return None
+        if sel.isdigit():
+            idx = int(sel)
+            if 1 <= idx <= len(names):
+                return names[idx - 1]
+        print("Invalid selection. Please try again.")
+
+
+def _prompt_select_usb_printer(candidates: List[Tuple[int, int, str, str]]) -> Optional[Tuple[int, int]]:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        vid, pid, manufacturer, product = candidates[0]
+        print(f"Discovered printer: {manufacturer or 'Unknown'} - {product or 'Unknown'} (VID=0x{vid:04x}, PID=0x{pid:04x})")
+        return (vid, pid)
+
+    print("Multiple USB printers detected:")
+    for idx, (vid, pid, manufacturer, product) in enumerate(candidates, start=1):
+        label = f"{manufacturer or 'Unknown'} - {product or 'Unknown'}"
+        print(f"  {idx}. {label} (VID=0x{vid:04x}, PID=0x{pid:04x})")
+
+    while True:
+        sel = _prompt_input("Select a printer by number (or press Enter to cancel): ").strip()
+        if not sel:
+            return None
+        if sel.isdigit():
+            idx = int(sel)
+            if 1 <= idx <= len(candidates):
+                vid, pid, *_ = candidates[idx - 1]
+                return (vid, pid)
+        print("Invalid selection. Please try again.")
+
+
+def select_printer_target() -> Tuple[str, Any]:
+    """Prompt once and return a reusable printer target descriptor.
+
+    Returns ('win32', printer_name) or ('usb', (vid, pid)).
+    """
+    import os
+    if os.name == 'nt':
+        names = discover_windows_printers()
+        selection = _prompt_select_windows_printer(names)
+        if selection:
+            return ('win32', selection)
+        print(
+            "Windows spooler method unavailable or not selected; attempting direct USB access (libusb required)."
+        )
+
+    candidates = discover_usb_printers()
+    selection_usb = _prompt_select_usb_printer(candidates)
+    if selection_usb is None:
+        raise SystemExit("No suitable printer selected or found.")
+    return ('usb', selection_usb)
+
+
+def open_printer_from_target(target: Tuple[str, Any]) -> Any:
+    kind, data = target
+    if kind == 'win32':
+        if Win32Raw is None:
+            raise SystemExit("Win32Raw backend not available; install python-escpos with Windows support.")
+        return Win32Raw(printer_name=data)
+    if kind == 'usb':
+        vid, pid = data
+        return Usb(vid, pid, profile=PRINTER_PROFILE)
+    raise SystemExit("Unknown printer target kind.")
+
+
+def _reset_text_style(printer_instance: Any) -> None:
+    printer_instance.set(align='left', bold=False, underline=0, width=1, height=1)
+
+
+def _get_columns_from_profile(profile: Any) -> Optional[int]:
+    if profile is None:
+        return None
+    try:
+        if hasattr(profile, "get") and callable(profile.get):
+            cols = profile.get("columns")
+            if isinstance(cols, dict):
+                normal = cols.get("normal")
+                if isinstance(normal, int) and normal > 0:
+                    return normal
+            if isinstance(cols, int) and cols > 0:
+                return cols
+    except Exception:
+        pass
+
+    try:
+        data = getattr(profile, "profile_data", None)
+        if isinstance(data, dict):
+            cols = data.get("columns")
+            if isinstance(cols, dict):
+                normal = cols.get("normal")
+                if isinstance(normal, int) and normal > 0:
+                    return normal
+            if isinstance(cols, int) and cols > 0:
+                return cols
+    except Exception:
+        pass
+
+    try:
+        cols = getattr(profile, "columns", None)
+        if isinstance(cols, dict):
+            normal = cols.get("normal")
+            if isinstance(normal, int) and normal > 0:
+                return normal
+        if isinstance(cols, int) and cols > 0:
+            return cols
+    except Exception:
+        pass
+
+    return None
+
+
+def get_printer_columns(printer_instance: Any, default: int = 42) -> int:
+    try:
+        profile = getattr(printer_instance, "profile", None)
+        cols = _get_columns_from_profile(profile)
+        if isinstance(cols, int) and cols > 0:
+            return cols
+    except Exception:
+        pass
+    return default
+
+
+def _separator(printer_instance: Any, width: Optional[int] = None) -> None:
+    if width is None:
+        width = get_printer_columns(printer_instance, default=42)
+    width = max(10, int(width))
+    printer_instance.text("-" * width + "\n")
+
+
+def _safe_feed(printer_instance: Any, lines: int = 3) -> None:
+    try:
+        feed_fn = getattr(printer_instance, "feed", None)
+        if callable(feed_fn):
+            feed_fn(lines)
+        else:
+            printer_instance.text("\n" * lines)
+    except Exception:
+        printer_instance.text("\n" * lines)
+
+
+def try_print_qr(printer_instance: Any, data: str, size: int = 4) -> None:
+    """Best-effort QR printing; ignored if backend/printer does not support."""
+    if not data:
+        return
+    try:
+        qr_fn = getattr(printer_instance, "qr", None)
+        if callable(qr_fn):
+            qr_fn(data, size=size)
+            printer_instance.text("\n")
+    except Exception:
+        # quietly ignore QR failures
+        pass
+
+
+def try_beep(printer_instance: Any, count: int = 2, duration: int = 3) -> None:
+    """Best-effort audible beep to capture attention; quietly ignored if unsupported.
+
+    Some ESC/POS printers implement a `beep` method. We try a few common signatures.
+    """
+    try:
+        beep_fn = getattr(printer_instance, "beep", None)
+        if callable(beep_fn):
+            try:
+                beep_fn(count, duration)
+                return
+            except Exception:
+                pass
+            try:
+                beep_fn()
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def print_text_document(printer_instance: Any, title: str, body: str) -> None:
+    """Print a simple text document: bold title and wrapped body. No header, no objectives.
+
+    Uses intelligent wrapping based on detected printer width.
+    """
+    cols = get_printer_columns(printer_instance, default=42)
+
+    # Title
+    printer_instance.set(align='left', bold=True)
+    for line in textwrap.TextWrapper(width=cols, break_long_words=False, break_on_hyphens=False).wrap(title.strip() or "Untitled"):
+        printer_instance.text(line + "\n")
+    _reset_text_style(printer_instance)
+
+    # Spacing
+    printer_instance.text("\n")
+
+    # Body
+    if body.strip():
+        wrapper = textwrap.TextWrapper(width=cols, break_long_words=False, break_on_hyphens=False)
+        for para in body.splitlines():
+            if not para.strip():
+                printer_instance.text("\n")
+            else:
+                for line in wrapper.wrap(para.strip()):
+                    printer_instance.text(line + "\n")
+
+    # Trailing space and cut
+    printer_instance.text("\n")
+    _safe_feed(printer_instance, 2)
+    printer_instance.cut()

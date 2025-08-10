@@ -1,0 +1,5 @@
+python-escpos>=3.1.0
+pyusb>=1.2.1
+# Optional: Windows printing support
+pywin32>=306; platform_system == "Windows"
+# Optional: Local LLM via Ollama (HTTP only, no package required)
