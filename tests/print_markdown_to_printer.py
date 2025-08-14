@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Iterable
 import textwrap
@@ -149,6 +150,11 @@ def main() -> None:
         action="store_true",
         help="Select printer non-interactively (env vars or first available)",
     )
+    parser.add_argument(
+        "--force-prompt",
+        action="store_true",
+        help="Always prompt for a printer selection (even if only one is found).",
+    )
     args = parser.parse_args()
 
     if args.path:
@@ -161,11 +167,33 @@ def main() -> None:
 
     md_text = markdown_path.read_text(encoding="utf-8")
 
-    target = (
-        select_printer_target_noninteractive()
-        if args.noninteractive
-        else select_printer_target()
-    )
+    if args.force_prompt:
+        # Force an explicit prompt sequence regardless of env vars
+        from receiptquest.printing.printer_utils import (
+            discover_windows_printers,
+            _prompt_select_windows_printer,
+            discover_usb_printers,
+            _prompt_select_usb_printer,
+        )
+
+        target = None
+        if os.name == "nt":
+            names = discover_windows_printers()
+            selection = _prompt_select_windows_printer(names)
+            if selection:
+                target = ("win32", selection)
+        if target is None:
+            candidates = discover_usb_printers()
+            selection_usb = _prompt_select_usb_printer(candidates)
+            if selection_usb is None:
+                raise SystemExit("No suitable printer selected or found.")
+            target = ("usb", selection_usb)
+    else:
+        target = (
+            select_printer_target_noninteractive()
+            if args.noninteractive
+            else select_printer_target()
+        )
     printer = open_printer_from_target(target)
 
     try:
