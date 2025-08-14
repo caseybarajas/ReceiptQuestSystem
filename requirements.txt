@@ -5,3 +5,5 @@ pywin32>=306; platform_system == "Windows"
 # Optional: Local LLM via Ollama (HTTP only, no package required)
 Flask>=3.0.0
 waitress>=2.1.2
+# Optional: Console Markdown rendering for tests
+rich>=13.7.1
