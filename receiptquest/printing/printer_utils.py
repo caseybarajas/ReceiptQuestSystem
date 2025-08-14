@@ -1,5 +1,44 @@
 from typing import List, Optional, Tuple, Any
 import textwrap
+import os
+import pathlib
+import tempfile
+
+# Ensure a usable temporary directory exists before importing libraries that
+# rely on tempfile (e.g., python-escpos). Some minimal systems may lack /tmp.
+def _ensure_temp_directory() -> None:
+    # If Python can already resolve a temp dir, keep it
+    try:
+        _ = tempfile.gettempdir()
+        return
+    except Exception:
+        pass
+
+    # Try common env vars first
+    for var_name in ("TMPDIR", "TEMP", "TMP"):
+        val = os.getenv(var_name)
+        if isinstance(val, str) and val.strip():
+            try:
+                path = pathlib.Path(val.strip())
+                path.mkdir(parents=True, exist_ok=True)
+                os.environ[var_name] = str(path)
+                _ = tempfile.gettempdir()
+                return
+            except Exception:
+                continue
+
+    # Fallback to a user-scoped cache path
+    fallback = os.path.expanduser("~/.cache/receiptquest/tmp")
+    try:
+        path = pathlib.Path(fallback)
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(path)
+        _ = tempfile.gettempdir()
+    except Exception:
+        # Last resort: do nothing; downstream import may still fail with a clear error
+        pass
+
+_ensure_temp_directory()
 
 try:
     # python-escpos printer (USB)
@@ -172,6 +211,72 @@ def select_printer_target() -> Tuple[str, Any]:
     if selection_usb is None:
         raise SystemExit("No suitable printer selected or found.")
     return ('usb', selection_usb)
+
+
+def _select_printer_target_from_env() -> Optional[Tuple[str, Any]]:
+    """Select printer target based on environment variables.
+
+    Supported environment variables:
+    - RQS_PRINTER_KIND: 'win32' or 'usb'
+      - If 'win32':
+          - RQS_PRINTER_NAME: Windows printer name
+      - If 'usb':
+          - RQS_USB_VID: Vendor ID (hex like 0x0416 or decimal)
+          - RQS_USB_PID: Product ID (hex like 0x5011 or decimal)
+    """
+    import os
+    kind = (os.getenv('RQS_PRINTER_KIND') or '').strip().lower()
+    if not kind:
+        return None
+    if kind == 'win32':
+        name = os.getenv('RQS_PRINTER_NAME')
+        if name:
+            return ('win32', name)
+        return None
+    if kind == 'usb':
+        vid_raw = os.getenv('RQS_USB_VID')
+        pid_raw = os.getenv('RQS_USB_PID')
+        if not vid_raw or not pid_raw:
+            return None
+        def _parse_id(value: str) -> Optional[int]:
+            v = value.strip().lower()
+            try:
+                if v.startswith('0x'):
+                    return int(v, 16)
+                return int(v)
+            except Exception:
+                return None
+        vid = _parse_id(vid_raw)
+        pid = _parse_id(pid_raw)
+        if isinstance(vid, int) and isinstance(pid, int):
+            return ('usb', (vid, pid))
+        return None
+    return None
+
+
+def select_printer_target_noninteractive() -> Tuple[str, Any]:
+    """Select a printer target without prompting.
+
+    Order of precedence:
+    1) Environment variables (RQS_PRINTER_KIND, ...)
+    2) Windows printers (first available) if on Windows
+    3) USB printers (first available)
+    """
+    env_target = _select_printer_target_from_env()
+    if env_target is not None:
+        return env_target
+
+    import os
+    if os.name == 'nt':
+        names = discover_windows_printers()
+        if names:
+            return ('win32', names[0])
+
+    candidates = discover_usb_printers()
+    if candidates:
+        vid, pid, *_ = candidates[0]
+        return ('usb', (vid, pid))
+    raise SystemExit("No suitable printer found (non-interactive mode). Set RQS_PRINTER_* env vars or connect a printer.")
 
 
 def open_printer_from_target(target: Tuple[str, Any]) -> Any:

@@ -3,3 +3,5 @@ pyusb>=1.2.1
 # Optional: Windows printing support
 pywin32>=306; platform_system == "Windows"
 # Optional: Local LLM via Ollama (HTTP only, no package required)
+Flask>=3.0.0
+waitress>=2.1.2

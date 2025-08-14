@@ -2,9 +2,10 @@ from typing import List, Dict
 import os
 import argparse
 
-from ..printing import select_printer_target, open_printer_from_target
+from ..printing import select_printer_target, select_printer_target_noninteractive, open_printer_from_target
 from ..core.models import Quest, Objective
 from ..printing.quest_formatter import print_supportive_quest
+from .web_server import create_app
 
 try:
     from ..core.quest_generator import LocalLLMQuestGenerator
@@ -283,13 +284,55 @@ def _generate_data_from_intent(intent: str, use_llm: bool) -> Dict[str, object]:
     if not use_llm or LocalLLMQuestGenerator is None:
         return _fallback_template_from_intent(text)
     try:
+        # Normalize compound separators
+        raw = text
+        separators = [" then ", " and then ", " after that ", " afterwards ", ";"]
+        for sep in separators:
+            # Case-insensitive replacement
+            import re
+            raw = re.sub(re.escape(sep), "|", raw, flags=re.IGNORECASE)
+        parts = [p.strip(" ,.") for p in raw.split("|") if p.strip()] if "|" in raw else [text]
+
         generator = LocalLLMQuestGenerator()
-        data = generator.generate(text)
-        # Best-effort sanity defaults if the model returns partial data
-        if not data.get("title"):
-            data["title"] = f"Quest: {text[:77] + '...' if len(text) > 80 else text}"
-        if not data.get("objectives"):
-            data["objectives"] = _fallback_template_from_intent(text)["objectives"]
+
+        objectives: List[str] = []
+        titles: List[str] = []
+        text_lower = text.lower()
+        wants_break = any(k in text_lower for k in [" break", "take a break", "quick break"]) or "break" in text_lower
+
+        for idx, part in enumerate(parts):
+            subj = None
+            part_l = part.lower()
+            cat_override = None
+            if any(w in part_l for w in ["study", "homework", "assignment", "classwork", "math", "english", "essay", "paper", "writing"]):
+                cat_override = "study"
+                if any(w in part_l for w in ["math", "algebra", "geometry", "calculus", "statistics"]):
+                    subj = "math"
+                elif any(w in part_l for w in ["english", "essay", "paper", "writing"]):
+                    subj = "english"
+
+                data_g = generator.generate_granular(part, [], fast=True, category_override=cat_override, subject=subj)
+            else:
+                data_g = generator.generate_granular(part, [], fast=True)
+
+            part_objs = [str(o) for o in (data_g.get("objectives", []) or [])][:9]
+            if not part_objs:
+                data_c = generator.generate(part, fast=True)
+                part_objs = [str(o) for o in (data_c.get("objectives", []) or [])][:7]
+            if idx > 0 and wants_break:
+                objectives.append("Stand up and stretch briefly")
+            objectives.extend(part_objs)
+            t = str(data_g.get("title") or part).strip()
+            if t:
+                titles.append(t)
+
+        final_title = (" → ").join(titles[:3]) if len(titles) > 1 else f"Quest: {text[:77] + '...' if len(text) > 80 else text}"
+        data = {
+            "title": final_title,
+            "description": text,
+            "objectives": objectives[:18] if objectives else _fallback_template_from_intent(text)["objectives"],
+            "rewards": "+10 Momentum, +10 Satisfaction",
+        }
         return data
     except Exception:
         return _fallback_template_from_intent(text)
@@ -306,12 +349,12 @@ def run():
         default=os.getenv("RQS_STYLE", "checkbox"),
         help="Default step style (checkbox recommended).",
     )
-    # AI is the default and only generator now; flag retained for compatibility but defaults to True
+    # Always ON: local LLM generation
     parser.add_argument(
         "--use-llm",
         action="store_true",
         default=True,
-        help="(Default ON) Use local LLM to generate very granular steps.",
+        help=argparse.SUPPRESS,
     )
     # ADHD mode is always 'super' by default now; allow override via env only
     parser.add_argument(
@@ -345,11 +388,58 @@ def run():
         action="store_true",
         help="Print once and exit (useful with non-interactive flags).",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Run as a small password-protected web server instead of CLI.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("RQS_HOST", "127.0.0.1"),
+        help="Web server host (default 127.0.0.1 for local-only access, use 0.0.0.0 for all interfaces)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("RQS_PORT", "54873")),
+        help="Web server port (default 54873)",
+    )
     args, _ = parser.parse_known_args()
 
     # Express · Super ADHD is the only and default interactive mode
     args.mode = "express"
     args.adhd_mode = "super"
+
+    if args.web:
+        # Non-interactive printer target detection for server mode
+        try:
+            target = select_printer_target_noninteractive()
+            app = create_app(
+                printer_target=target,
+                default_step_style=args.style,
+                use_llm=args.use_llm,
+                adhd_mode=args.adhd_mode,
+            )
+            # Prefer waitress on Windows/production; fall back to Flask dev server
+            try:
+                from waitress import serve  # type: ignore
+                print(f"Starting production server on {args.host}:{args.port}")
+                serve(app, host=args.host, port=args.port)
+            except ImportError:
+                print(
+                    "WARNING: Waitress not installed. "
+                    "Using Flask development server (not suitable for production)"
+                )
+                print("Install waitress with: pip install waitress")
+                print(f"Starting development server on {args.host}:{args.port}")
+                app.run(host=args.host, port=args.port)
+            except Exception as e:
+                print(f"Failed to start server: {e}")
+                return
+        except Exception as e:
+            print(f"Failed to create app: {e}")
+            return
+        return
 
     # Always prefer LLM generation; if unavailable, fallback will be used silently
 
@@ -400,12 +490,19 @@ def run():
                 if LocalLLMQuestGenerator is not None:
                     try:
                         generator = LocalLLMQuestGenerator()
-                        data_g = generator.generate_granular(title or description or "", objectives)
+                        data_g = generator.generate_granular(title or description or "", objectives, fast=True)
                         gen_objs = list(data_g.get("objectives", []) or [])  # type: ignore[assignment]
                         if gen_objs:
                             objectives = [str(o) for o in gen_objs]
                             title = str(data_g.get("title", title) or title)
                             description = str(data_g.get("description", description) or description)
+                        else:
+                            # Fallback to coarse generation if granular empty
+                            data = generator.generate(title or description or "", fast=True)
+                            if data.get("objectives"):
+                                objectives = list(data.get("objectives", []))  # type: ignore[assignment]
+                                title = str(data.get("title", title) or title)
+                                description = str(data.get("description", description) or description)
                     except Exception:
                         objectives = _expand_to_super_adhd(objectives, title, description)
                 elif len(objectives) <= 3:
@@ -447,7 +544,7 @@ def run():
                 if LocalLLMQuestGenerator is not None:
                     try:
                         generator = LocalLLMQuestGenerator()
-                        data_g = generator.generate_granular(title or description or "", objectives)
+                        data_g = generator.generate_granular(title or description or "", objectives, fast=True)
                         # Prefer generated objectives if they exist
                         gen_objs = list(data_g.get("objectives", []) or [])  # type: ignore[assignment]
                         if gen_objs:
@@ -455,6 +552,12 @@ def run():
                             # Fill missing title/description if provided
                             title = str(data_g.get("title", title) or title)
                             description = str(data_g.get("description", description) or description)
+                        else:
+                            data = generator.generate(title or description or "", fast=True)
+                            if data.get("objectives"):
+                                objectives = list(data.get("objectives", []))  # type: ignore[assignment]
+                                title = str(data.get("title", title) or title)
+                                description = str(data.get("description", description) or description)
                     except Exception:
                         objectives = _expand_to_super_adhd(objectives, title, description)
                 elif len(objectives) <= 3:
