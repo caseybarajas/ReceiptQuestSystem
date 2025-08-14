@@ -1,0 +1,78 @@
+########################
+# Python
+########################
+__pycache__/
+receiptquest/__pycache__/
+*.py[cod]
+*$py.class
+
+########################
+# Virtual environments
+########################
+.venv/
+venv/
+env/
+ENV/
+
+########################
+# Distribution / packaging
+########################
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+
+########################
+# Testing / coverage / tooling caches
+########################
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+########################
+# Logs & temp
+########################
+*.log
+logs/
+.cache/
+tmp/
+*.tmp
+
+########################
+# IDE / Editor
+########################
+.vscode/
+.idea/
+*.code-workspace
+
+########################
+# OS files
+########################
+.DS_Store
+Thumbs.db
+
+########################
+# Environment & secrets
+########################
+.env
+.env.*
+!.env.example
+
+########################
+# Jupyter
+########################
+.ipynb_checkpoints/
+

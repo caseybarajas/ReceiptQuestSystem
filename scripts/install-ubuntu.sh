@@ -136,7 +136,7 @@ ok "Launchers installed."
 log "[5/8] Interactive setup"
 read -rp "Admin username [admin]: " RQS_WEB_USER
 RQS_WEB_USER=${RQS_WEB_USER:-admin}
-read -rsp "Admin password (min 8 chars): " RQS_WEB_PASS; echo
+read -rsp "Admin password (min 12 chars): " RQS_WEB_PASS; echo
 if [[ ${#RQS_WEB_PASS} -lt 12 ]]; then
   echo "Password too short (minimum 12 characters required)." >&2
   exit 1
