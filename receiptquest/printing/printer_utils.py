@@ -279,6 +279,106 @@ def select_printer_target_noninteractive() -> Tuple[str, Any]:
     raise SystemExit("No suitable printer found (non-interactive mode). Set RQS_PRINTER_* env vars or connect a printer.")
 
 
+def _open_usb_printer_with_fallbacks(vid: int, pid: int) -> Any:
+    """Open a USB ESC/POS printer with several fallbacks.
+
+    Tries default, then detaching kernel driver, then autodetected endpoints and
+    configurations, and finally common endpoint/interface combos.
+    """
+    errors: List[str] = []
+
+    # Attempt 1: plain
+    try:
+        return Usb(vid, pid, profile=PRINTER_PROFILE)
+    except Exception as exc:
+        errors.append(f"default: {exc}")
+
+    # Attempt 2: detach kernel driver if bound
+    try:
+        return Usb(vid, pid, profile=PRINTER_PROFILE, usb_args={"detach_kernel_driver": True})
+    except Exception as exc:
+        errors.append(f"detach_kernel_driver: {exc}")
+
+    # Attempt 3: read descriptors to find endpoints/configs
+    try:
+        dev = usb.core.find(idVendor=vid, idProduct=pid)  # type: ignore[attr-defined]
+    except Exception as exc:
+        dev = None
+        errors.append(f"usb.find: {exc}")
+
+    if dev is not None:
+        try:
+            for cfg in dev:  # type: ignore[assignment]
+                cfg_val = getattr(cfg, "bConfigurationValue", None) or 1
+                for intf in cfg:
+                    try:
+                        intf_num = getattr(intf, "bInterfaceNumber", 0)
+                        out_ep = None
+                        in_ep = None
+                        for ep in intf:
+                            addr = getattr(ep, "bEndpointAddress", None)
+                            if addr is None:
+                                continue
+                            if usb.util.endpoint_direction(addr) == usb.util.ENDPOINT_OUT:  # type: ignore[attr-defined]
+                                out_ep = addr
+                            elif usb.util.endpoint_direction(addr) == usb.util.ENDPOINT_IN:  # type: ignore[attr-defined]
+                                in_ep = addr
+                        if out_ep is None:
+                            continue
+                        try:
+                            return Usb(
+                                vid,
+                                pid,
+                                profile=PRINTER_PROFILE,
+                                interface=intf_num,
+                                out_ep=out_ep,
+                                in_ep=in_ep,
+                                usb_args={
+                                    "detach_kernel_driver": True,
+                                    "bConfigurationValue": cfg_val,
+                                },
+                            )
+                        except Exception as exc:
+                            errors.append(
+                                f"iface {intf_num} cfg {cfg_val} out 0x{out_ep:02x} in 0x{(in_ep or 0):02x}: {exc}"
+                            )
+                    except Exception as exc:
+                        errors.append(f"intf-scan: {exc}")
+        except Exception as exc:
+            errors.append(f"cfg-scan: {exc}")
+
+    # Attempt 4: common endpoint/interface combos
+    for cfg_val in (1, 2):
+        for intf_num in (0, 1):
+            for in_ep in (0x81, 0x82, 0x83):
+                try:
+                    return Usb(
+                        vid,
+                        pid,
+                        profile=PRINTER_PROFILE,
+                        interface=intf_num,
+                        out_ep=0x01,
+                        in_ep=in_ep,
+                        usb_args={
+                            "detach_kernel_driver": True,
+                            "bConfigurationValue": cfg_val,
+                        },
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"combo cfg {cfg_val} if {intf_num} out 0x01 in 0x{in_ep:02x}: {exc}"
+                    )
+
+    hint = (
+        "Failed to open USB printer. On Linux, ensure permissions (udev rule), and that the 'usblp' kernel driver is not binding to the device. "
+        "You can test temporarily with: 'sudo modprobe -r usblp' and replug, or create a udev rule like: \n"
+        "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"%04x\", ATTR{idProduct}==\"%04x\", MODE=\"0666\"\n"
+        "Then: 'sudo udevadm control --reload-rules && sudo udevadm trigger' and replug the printer."
+    ) % (vid, pid)
+    detail = "; ".join(errors[-5:])  # include last few attempts for brevity
+    raise SystemExit(f"{hint}\nLast errors: {detail}")
+
+
 def open_printer_from_target(target: Tuple[str, Any]) -> Any:
     kind, data = target
     if kind == 'win32':
@@ -287,7 +387,7 @@ def open_printer_from_target(target: Tuple[str, Any]) -> Any:
         return Win32Raw(printer_name=data)
     if kind == 'usb':
         vid, pid = data
-        return Usb(vid, pid, profile=PRINTER_PROFILE)
+        return _open_usb_printer_with_fallbacks(vid, pid)
     raise SystemExit("Unknown printer target kind.")
 
 
