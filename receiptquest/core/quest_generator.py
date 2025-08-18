@@ -15,7 +15,7 @@ class LocalLLMQuestGenerator:
     """
 
     def __init__(self, model: Optional[str] = None, base_url: Optional[str] = None) -> None:
-        # Allow environment overrides fcor model and base URL
+        # Allow environment overrides for model and base URL
         env_model = os.getenv("RQS_MODEL")
         env_url = os.getenv("RQS_OLLAMA_URL")
         # Default to a very small, fast model for low-spec devices
@@ -126,20 +126,6 @@ class LocalLLMQuestGenerator:
         url = f"{self.base_url}/api/generate"
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        return body.get("response", "").strip()
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.2,
-                "num_predict": 300,
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.endpoint, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return body.get("response", "").strip()
 

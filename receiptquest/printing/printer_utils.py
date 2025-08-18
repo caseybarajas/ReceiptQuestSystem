@@ -284,18 +284,42 @@ def _open_usb_printer_with_fallbacks(vid: int, pid: int) -> Any:
 
     Tries default, then detaching kernel driver, then autodetected endpoints and
     configurations, and finally common endpoint/interface combos.
+
+    Additionally, validates the handle with a minimal write (ESC @) and falls
+    back if I/O fails after a seemingly successful open.
     """
     errors: List[str] = []
 
+    def _attempt_open_and_validate(**kwargs: Any) -> Any:
+        inst = Usb(vid, pid, **kwargs)
+        try:
+            raw_fn = getattr(inst, "_raw", None)
+            if callable(raw_fn):
+                raw_fn(b"\x1b@")  # Initialize printer; safe no-op for most models
+            else:
+                # Fallback to a benign write path
+                text_fn = getattr(inst, "text", None)
+                if callable(text_fn):
+                    text_fn("")
+        except Exception as write_exc:
+            try:
+                close_fn = getattr(inst, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+            raise write_exc
+        return inst
+
     # Attempt 1: plain
     try:
-        return Usb(vid, pid, profile=PRINTER_PROFILE)
+        return _attempt_open_and_validate(profile=PRINTER_PROFILE)
     except Exception as exc:
         errors.append(f"default: {exc}")
 
     # Attempt 2: detach kernel driver if bound
     try:
-        return Usb(vid, pid, profile=PRINTER_PROFILE, usb_args={"detach_kernel_driver": True})
+        return _attempt_open_and_validate(profile=PRINTER_PROFILE, usb_args={"detach_kernel_driver": True})
     except Exception as exc:
         errors.append(f"detach_kernel_driver: {exc}")
 
@@ -326,9 +350,7 @@ def _open_usb_printer_with_fallbacks(vid: int, pid: int) -> Any:
                         if out_ep is None:
                             continue
                         try:
-                            return Usb(
-                                vid,
-                                pid,
+                            return _attempt_open_and_validate(
                                 profile=PRINTER_PROFILE,
                                 interface=intf_num,
                                 out_ep=out_ep,
@@ -352,9 +374,7 @@ def _open_usb_printer_with_fallbacks(vid: int, pid: int) -> Any:
         for intf_num in (0, 1):
             for in_ep in (0x81, 0x82, 0x83):
                 try:
-                    return Usb(
-                        vid,
-                        pid,
+                    return _attempt_open_and_validate(
                         profile=PRINTER_PROFILE,
                         interface=intf_num,
                         out_ep=0x01,
@@ -503,32 +523,8 @@ def try_beep(printer_instance: Any, count: int = 2, duration: int = 3) -> None:
 
 
 def print_text_document(printer_instance: Any, title: str, body: str) -> None:
-    """Print a simple text document: bold title and wrapped body. No header, no objectives.
-
-    Uses intelligent wrapping based on detected printer width.
-    """
-    cols = get_printer_columns(printer_instance, default=42)
-
-    # Title
-    printer_instance.set(align='left', bold=True)
-    for line in textwrap.TextWrapper(width=cols, break_long_words=False, break_on_hyphens=False).wrap(title.strip() or "Untitled"):
-        printer_instance.text(line + "\n")
-    _reset_text_style(printer_instance)
-
-    # Spacing
-    printer_instance.text("\n")
-
-    # Body
-    if body.strip():
-        wrapper = textwrap.TextWrapper(width=cols, break_long_words=False, break_on_hyphens=False)
-        for para in body.splitlines():
-            if not para.strip():
-                printer_instance.text("\n")
-            else:
-                for line in wrapper.wrap(para.strip()):
-                    printer_instance.text(line + "\n")
-
-    # Trailing space and cut
-    printer_instance.text("\n")
-    _safe_feed(printer_instance, 2)
-    printer_instance.cut()
+    """Deprecated: prefer print_markdown_document. Kept for backward-compatibility."""
+    from .markdown_renderer import print_markdown_document  # local import to avoid cycle
+    title_md = (f"# {title.strip()}\n\n" if title and title.strip() else "")
+    text = f"{title_md}{body or ''}"
+    print_markdown_document(printer_instance, text)

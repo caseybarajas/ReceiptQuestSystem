@@ -5,11 +5,11 @@ import os
 import time
 import secrets
 import threading
-from queue import Queue, Empty
+from queue import Queue
 
 from flask import Flask, request, redirect, url_for, render_template_string, session, abort
 
-from ..printing import open_printer_from_target
+from ..printing import open_printer_from_target, print_markdown_document
 from ..printing.quest_formatter import print_supportive_quest
 from ..core.models import Quest, Objective
 
@@ -497,19 +497,20 @@ def create_app(
     home_html = """
   <div style=\"text-align: center; margin-bottom: 32px;\">
     <div style=\"font-size: 48px; margin-bottom: 12px;\">📝</div>
-    <h2 style=\"margin: 0; font-size: 28px;\">Create Your Quest</h2>
-    <p style=\"color: var(--text-muted); margin: 12px 0 0;\">Turn any task into a printable adventure</p>
+    <h2 style=\"margin: 0; font-size: 28px;\">Print Your Text</h2>
+    <p style=\"color: var(--text-muted); margin: 12px 0 0;\">We\'ll format it nicely for your receipt</p>
   </div>
   
   <form method=\"post\" action=\"{{ url_for('submit') }}\"> 
     <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf_token }}\">
     
-    <div class=\"hero-input\">
-      <input type=\"text\" name=\"line\" placeholder=\"What would you like to accomplish?\" autocomplete=\"off\" autocapitalize=\"sentences\" spellcheck=\"false\" autofocus>
-    </div>
+    <div class=\"hero-input\"> 
+      <input type=\"text\" name=\"line\" placeholder=\"What would you like to print?\" autocomplete=\"off\" autocapitalize=\"sentences\" spellcheck=\"false\" autofocus>
+    </div> 
     
     <div class=\"actions\"> 
-      <button class=\"btn\" type=\"submit\">Print Quest</button>
+      <button class=\"btn\" type=\"submit\" name=\"mode\" value=\"markdown\">Print</button>
+      <button class=\"btn secondary\" type=\"submit\" name=\"mode\" value=\"quest\">Print as Quest</button>
     </div>
     
     {% if message %}<div class=\"success\">{{ message }}</div>{% endif %} 
@@ -521,11 +522,11 @@ def create_app(
     printed_html = """
   <div style=\"text-align: center;\">
     <div style=\"font-size: 64px; margin-bottom: 16px; animation: bounce 1s ease-in-out;\">🎉</div>
-    <h2 style=\"margin: 0 0 12px 0; font-size: 28px;\">Quest Dispatched!</h2>
+    <h2 style=\"margin: 0 0 12px 0; font-size: 28px;\">Printing Started!</h2>
     <div class=\"success\" style=\"margin: 0; border: none; background: none; text-align: center;\">
-      <div style=\"font-size: 18px; margin-bottom: 8px;\">Your magical quest is printing now</div>
+      <div style=\"font-size: 18px; margin-bottom: 8px;\">Your formatted text is printing now</div>
       <p style=\"margin: 0; font-size: 14px; opacity: 0.8;\">
-        Check your printer in a few moments for your personalized quest receipt!
+        Check your printer in a few moments for your receipt!
       </p>
     </div>
   </div>
@@ -758,14 +759,7 @@ def create_app(
     def _parse_objectives(raw: str) -> List[str]:
         return [item.strip() for item in raw.split(',') if item.strip()]
 
-    def _expand_to_super_adhd(objectives: List[str], title: str, description: str) -> List[str]:
-        # Import from CLI module to reuse logic without circular imports at module import time
-        from .main import _expand_to_super_adhd as expand
-        return expand(objectives, title, description)
-
-    def _generate_data_from_intent(intent: str, use_llm_flag: bool) -> Dict[str, Any]:
-        from .main import _generate_data_from_intent as gen
-        return gen(intent, use_llm_flag)
+    # Removed unused helpers (_expand_to_super_adhd, _generate_data_from_intent)
 
     # ---------------- In-memory print queue ----------------
     job_queue: Queue = Queue()
@@ -821,82 +815,105 @@ def create_app(
         title_j = str(job.get("title") or "").strip()
         steps_j = str(job.get("steps") or "").strip()
         description_j = str(job.get("description") or "").strip()
+        mode_j = str(job.get("mode") or "markdown").strip().lower()
         style_j = str(job.get("style") or default_step_style).strip() or default_step_style
         adhd_mode_j = str(job.get("adhd_mode") or adhd_mode).strip() or adhd_mode
 
-        # Build data
-        if line_j:
-            if "|" in line_j:
-                raw_title, raw_steps = line_j.split("|", 1)
-                title_j = raw_title.strip() or (title_j or "Untitled Quest")
-                objectives = _parse_objectives(raw_steps)
-                data = {"title": title_j, "description": description_j, "objectives": objectives}
-            else:
-                data = _generate_data_from_intent(line_j, use_llm)
-                title_j = str(data.get("title", title_j or "Untitled Quest")) or "Untitled Quest"
-                description_j = str(data.get("description", description_j))
-                objectives = list(data.get("objectives", []) or [])
-        elif title_j or steps_j or description_j:
-            title_j = title_j or "Untitled Quest"
-            objectives = _parse_objectives(steps_j)
-            if not objectives and line_j:
-                data = _generate_data_from_intent(line_j, use_llm)
-                objectives = list(data.get("objectives", []) or [])
-        else:
-            # Nothing to do
-            return
-
-        # ADHD expansion / local LLM granular generation
-        if adhd_mode_j == "super":
-            try:
-                from ..core.quest_generator import LocalLLMQuestGenerator
-                generator = LocalLLMQuestGenerator()
-                # If study-related, guide the generator harder
-                subj = None
-                t_l = (title_j + " " + description_j + " " + " ".join(objectives)).lower()
-                cat_override = None
-                if any(w in t_l for w in ["study", "homework", "assignment", "classwork", "math", "english", "essay", "paper", "writing"]):
-                    cat_override = "study"
-                    if any(w in t_l for w in ["math", "algebra", "geometry", "calculus", "statistics"]):
-                        subj = "math"
-                    elif any(w in t_l for w in ["english", "essay", "paper", "writing"]):
-                        subj = "english"
-                data_g = generator.generate_granular(title_j or description_j or "", objectives, fast=True, category_override=cat_override, subject=subj)
-                gen_objs = list(data_g.get("objectives", []) or [])
-                if gen_objs:
-                    objectives = [str(o) for o in gen_objs]
-                    title_j = str(data_g.get("title", title_j) or title_j)
-                    description_j = str(data_g.get("description", description_j) or description_j)
+        if mode_j == "quest":
+            # Build quest data from inputs
+            objectives: List[str] = []
+            if line_j:
+                if "|" in line_j:
+                    raw_title, raw_steps = line_j.split("|", 1)
+                    title_j = raw_title.strip() or (title_j or "Untitled Quest")
+                    objectives = _parse_objectives(raw_steps)
                 else:
-                    data_c = generator.generate(title_j or description_j or "", fast=True)
-                    gen_objs = list(data_c.get("objectives", []) or [])
+                    try:
+                        from .main import _generate_data_from_intent as gen
+                        data = gen(line_j, True)
+                        title_j = str(data.get("title", title_j or "Untitled Quest")) or "Untitled Quest"
+                        description_j = str(data.get("description", description_j))
+                        objectives = list(data.get("objectives", []) or [])
+                    except Exception:
+                        # Fallback: treat entire line as title
+                        title_j = title_j or (line_j if line_j else "Untitled Quest")
+            elif title_j or steps_j or description_j:
+                title_j = title_j or "Untitled Quest"
+                objectives = _parse_objectives(steps_j)
+            else:
+                return
+
+            # Optional granular expansion
+            if adhd_mode_j == "super":
+                try:
+                    from ..core.quest_generator import LocalLLMQuestGenerator
+                    generator = LocalLLMQuestGenerator()
+                    data_g = generator.generate_granular(title_j or description_j or "", objectives, fast=True)
+                    gen_objs = list(data_g.get("objectives", []) or [])
                     if gen_objs:
                         objectives = [str(o) for o in gen_objs]
-                        title_j = str(data_c.get("title", title_j) or title_j)
-                        description_j = str(data_c.get("description", description_j) or description_j)
-            except Exception:
-                # keep original objectives
-                pass
+                        title_j = str(data_g.get("title", title_j) or title_j)
+                        description_j = str(data_g.get("description", description_j) or description_j)
+                except Exception:
+                    pass
 
-        # Print
-        quest = Quest.new(
-            title=title_j or "Untitled Quest",
-            description=description_j or "",
-            objectives=[Objective(text=str(o)) for o in objectives],
-        )
+            quest = Quest.new(
+                title=title_j or "Untitled Quest",
+                description=description_j or "",
+                objectives=[Objective(text=str(o)) for o in objectives],
+            )
+            try:
+                printer = open_printer_from_target(printer_target)
+                try:
+                    print_supportive_quest(
+                        printer,
+                        quest,
+                        step_style=style_j,
+                        include_activation=True,
+                        cue_text=None,
+                        timer_minutes=None,
+                        qr_link=None,
+                        show_time_estimates=False,
+                    )
+                finally:
+                    try:
+                        close_fn = getattr(printer, "close", None)
+                        if callable(close_fn):
+                            close_fn()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return
+
+        # Default: Markdown pretty print
+        # Build pretty Markdown from the provided text
+        text_md = ""
+        if line_j:
+            try:
+                from .main import _auto_markdown_from_text as auto_md
+                text_md = auto_md(line_j)
+            except Exception:
+                text_md = line_j
+        elif title_j or steps_j or description_j:
+            parts: List[str] = []
+            if title_j:
+                parts.append(f"# {title_j}")
+            if description_j:
+                parts.append(description_j)
+            if steps_j:
+                objectives = _parse_objectives(steps_j)
+                if objectives:
+                    parts.append("\n".join(f"- {o}" for o in objectives))
+            text_md = "\n\n".join([p for p in parts if p.strip()])
+        else:
+            return
+
+        # Print the Markdown document
         try:
             printer = open_printer_from_target(printer_target)
             try:
-                print_supportive_quest(
-                    printer,
-                    quest,
-                    step_style=style_j,
-                    include_activation=True,
-                    cue_text=None,
-                    timer_minutes=None,
-                    qr_link=None,
-                    show_time_estimates=False,
-                )
+                print_markdown_document(printer, text_md)
             finally:
                 try:
                     close_fn = getattr(printer, "close", None)
@@ -926,6 +943,7 @@ def create_app(
         title = (form.get("title") or "").strip()
         steps = (form.get("steps") or "").strip()
         description = (form.get("description") or "").strip()
+        mode_sel = (form.get("mode") or "markdown").strip().lower()
         style = (form.get("style") or default_step_style).strip() or default_step_style
         adhd_mode_sel = (form.get("adhd_mode") or adhd_mode).strip() or adhd_mode
         # If nothing provided, bounce
@@ -940,6 +958,7 @@ def create_app(
             "description": description,
             "style": style,
             "adhd_mode": adhd_mode_sel,
+            "mode": mode_sel,
         })
         return redirect(url_for('printed'))
 
