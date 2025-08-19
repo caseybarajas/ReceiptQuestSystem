@@ -107,8 +107,16 @@ fi
 log "[2/6] Removing launchers from /usr/local/bin (sudo)..."
 for bin in "$BIN_CLI" "$BIN_WEB"; do
   if [[ -f "$bin" ]]; then
-    # Best-effort ownership check: only remove if it references this repo
-    if grep -q "$REPO_DIR" "$bin" 2>/dev/null; then
+    # Check symlink target first; then fall back to fixed-string grep of file contents
+    if [[ -L "$bin" ]]; then
+      target_path="$(readlink -f "$bin" 2>/dev/null || true)"
+      if [[ -n "$target_path" && "$target_path" == *"$REPO_DIR"* ]]; then
+        sudo rm -f "$bin"
+        ok "Removed $bin (symlink to repo)"
+        continue
+      fi
+    fi
+    if grep -F -q "$REPO_DIR" "$bin" 2>/dev/null; then
       sudo rm -f "$bin"
       ok "Removed $bin"
     else

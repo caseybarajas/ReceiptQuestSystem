@@ -152,7 +152,7 @@ class LocalLLMQuestGenerator:
             "{\n"
             "  \"title\": \"Study Session\",\n"
             "  \"description\": \"Focused study session with clear start and stop.\",\n"
-            "  \"objectives\": [\"Set a timer\", \"Close distractions\", \"Work on the next small chunk\", \"Write 1-2 summary sentences\"],\n"
+            "  \"objectives\": [\"Prepare workspace\", \"Close distractions\", \"Work on the next small chunk\", \"Write 1-2 summary sentences\"],\n"
             "  \"rewards\": \"+10 Momentum, +10 Satisfaction\"\n"
             "}\n"
             f"Task: {intent}\n"
@@ -167,14 +167,19 @@ class LocalLLMQuestGenerator:
         category_override: Optional[str] = None,
         subject: Optional[str] = None,
     ) -> str:
+        # Include any existing user-provided steps
         existing_block = ""
         if existing:
             try:
                 steps_json = json.dumps([str(s) for s in existing])
             except Exception:
                 steps_json = "[]"
-            existing_block = ("UserProvidedSteps: " + steps_json + "\n")
+            existing_block = "UserProvidedSteps: " + steps_json + "\n"
+
+        # Optional custom instructions
         custom_instructions = self._load_custom_instructions()
+        custom_block = (custom_instructions.strip() + "\n") if custom_instructions else ""
+
         # Lightweight categorization to reduce misclassification (e.g., tidy desk ≠ study)
         def _infer_category(text: str) -> Dict[str, Any]:
             t = (text or "").lower()
@@ -214,6 +219,7 @@ class LocalLLMQuestGenerator:
                 info["category"] = "errand"
                 return info
             return info
+
         if isinstance(category_override, str) and category_override.strip():
             category = category_override.strip().lower()
             surface = ""
@@ -222,6 +228,8 @@ class LocalLLMQuestGenerator:
             category = ctx.get("category", "generic")
             surface = ctx.get("surface", "")
         category_block = f"Category: {category}\n" + (f"Surface: {surface}\n" if surface else "")
+
+        # Category-specific rules
         rules: List[str] = []
         if category == "cleaning":
             rules += [
@@ -244,228 +252,32 @@ class LocalLLMQuestGenerator:
                 "End with 'Enjoy a sip'.",
                 "Use machine/pod-friendly steps unless a method is stated.",
             ]
-        # Strong negative constraints for cleaning to avoid study bleed-through
         if category == "cleaning":
             rules.append(
                 "Do not include any study terms: writing utensil, notebook, paper, page, skim, read, summary, problem."
             )
         rules_block = ("\n".join(rules) + "\n") if rules else ""
-        return (
-            "You produce a VERY granular, activation-friendly checklist for the user's real-life task.\n"
-            "Identify the task category from the user's words (e.g., making coffee, washing dishes, doing laundry, cooking, studying, cleaning, showering, errands).\n"
-            "Produce domain-appropriate steps for that task.\n"
-            "Do NOT invent brand/model-specific details or people.\n"
-            "Do NOT guess hidden specifics (no fake recipes, names, tools not mentioned).\n"
-            "Avoid all times/durations (no minutes/seconds/timers).\n"
-            "The FIRST step must be a tiny micro-activation that reduces friction.\n"
-            "Use short imperative sentences (<= 60 chars).\n"
-            "For beverages/liquids, end with 'Enjoy a sip' (never 'bite').\n"
-            "If coffee method is unknown, write steps usable with common machines/pods. Avoid pour-over/manual specifics.\n"
-            + ("Keep objectives between 6 and 9 steps.\n" if fast else "") +
-            "Output STRICT JSON ONLY. No extra text, no markdown.\n"
-            "Schema: {\n"
-            "  \"title\": string,\n"
-            "  \"description\": string,\n"
-            "  \"objectives\": array of short strings (8–14 typical),\n"
-            "  \"rewards\": string\n"
-            "}\n"
-            "Examples (task-aware, non-fabricated):\n"
-            "{\n"
-            "  \"title\": \"Make Bed\",\n"
-            "  \"description\": \"Make a tidy bed.\",\n"
-            "  \"objectives\": [\n"
-            "    \"Clear items off the bed\", \"Shake out the sheets\", \"Fit the bottom sheet\",\n"
-            "    \"Smooth out wrinkles\", \"Add the top sheet\", \"Pull up blanket or duvet\",\n"
-            "    \"Arrange pillows\", \"Smooth the top layer\", \"Mark this as done\"\n"
-            "  ],\n"
-            "  \"rewards\": \"Tidy space and reset\"\n"
-            "}\n"
-            "{\n"
-            "  \"title\": \"Tidy Desk\",\n"
-            "  \"description\": \"Clear and reset a desk surface.\",\n"
-            "  \"objectives\": [\n"
-            "    \"Trash obvious wrappers\", \"Gather tools (bin, cloth)\", \"Make a clear spot\",\n"
-            "    \"Group: keep / relocate / trash\", \"Wipe the desk\", \"Return keep items neatly\",\n"
-            "    \"Relocate other items\", \"Put tools away\", \"Mark this as done\"\n"
-            "  ],\n"
-            "  \"rewards\": \"Clean space and reset\"\n"
-            "}\n"
-            "{\n"
-            "  \"title\": \"Make Coffee\",\n"
-            "  \"description\": \"Brew a simple cup of coffee.\",\n"
-            "  \"objectives\": [\n"
-            "    \"Put mug and tools on the counter\", \"Fill kettle with water\", \"Heat the water\",\n"
-            "    \"Place filter and rinse it\", \"Add ground coffee\", \"Pour a little water to wet grounds\",\n"
-            "    \"Pour remaining water slowly\", \"Wait for it to drip\", \"Discard filter\",\n"
-            "    \"Add milk/sugar if desired\", \"Enjoy a sip\"\n"
-            "  ],\n"
-            "  \"rewards\": \"Warm drink and a small win\"\n"
-            "}\n"
-            "{\n"
-            "  \"title\": \"Wash Dishes\",\n"
-            "  \"description\": \"Clean a sink of dishes.\",\n"
-            "  \"objectives\": [\n"
-            "    \"Clear a small space by the sink\", \"Scrape food into trash\", \"Group dishes by type\",\n"
-            "    \"Fill sink with warm soapy water\", \"Wash cups and utensils first\", \"Wash plates and bowls\",\n"
-            "    \"Wash pots/pans last\", \"Rinse and rack to dry\", \"Wipe the counter\"\n"
-            "  ],\n"
-            "  \"rewards\": \"Clean space and reset\"\n"
-            "}\n"
-            + (custom_instructions + "\n" if custom_instructions else "")
-            + category_block + rules_block + f"Task: {intent}\n" + existing_block +
-            "Respond with JSON only."
+
+        prompt_text = (
+            custom_block
+            + "You produce a VERY granular, activation-friendly checklist for the user's real-life task.\n"
+            + "Identify the task category from the user's words (e.g., making coffee, washing dishes, doing laundry, cooking, studying, cleaning, showering, errands).\n"
+            + "Produce domain-appropriate steps for that task.\n"
+            + "Do NOT invent brand/model-specific details or people.\n"
+            + "Do NOT guess hidden specifics (no fake recipes, names, tools not mentioned).\n"
+            + "Avoid all times/durations (no minutes/seconds/timers).\n"
+            + "The FIRST step must be a tiny micro-activation that reduces friction.\n"
+            + "Use short imperative sentences (<= 60 chars).\n"
+            + "For beverages/liquids, end with 'Enjoy a sip' (never 'bite').\n"
+            + category_block
+            + rules_block
+            + existing_block
+            + "Output STRICT JSON ONLY. No extra text, no markdown.\n"
+            + "Schema: {\n  \"title\": string,\n  \"description\": string,\n  \"objectives\": array of 6-15 short strings,\n  \"rewards\": string\n}\n"
+            + f"Task: {intent}\n"
+            + "Respond with JSON only."
         )
-
-    def _load_custom_instructions(self) -> str:
-        path = os.getenv("RQS_AI_INSTRUCTIONS_PATH", "ai_instructions.md")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                text = f.read().strip()
-                return text
-        except Exception:
-            return ""
-
-    # --------- Two-stage planning helpers (model-agnostic, general-purpose) ---------
-    def _extract_keywords(self, text: str) -> List[str]:
-        raw = (text or "").lower()
-        tokens = [t.strip(" ,.;:!?") for t in raw.split()]
-        stop = {
-            "the","a","an","and","or","then","after","that","to","of","for","on","in","at","with","from","into","by","it","is","be","do","did","done","make","take","quick","break","my","your","their","our","this","next","first","second","third","small","big","little","some","any"
-        }
-        keywords: List[str] = []
-        for t in tokens:
-            if len(t) <= 2 or t in stop:
-                continue
-            if t not in keywords:
-                keywords.append(t)
-        return keywords[:20]
-
-    def _genericity_score(self, steps: List[str]) -> float:
-        if not steps:
-            return 1.0
-        generic_phrases = [
-            "open the task","first problem","next chunk","save","skim","review instructions",
-            "complete the next section","work on it","start","continue","finish","wrap up",
-            "plan","prepare","complete","do the task","task","thing"
-        ]
-        total = 0
-        generic_hits = 0
-        for s in steps:
-            total += 1
-            low = s.lower()
-            if any(p in low for p in generic_phrases):
-                generic_hits += 1
-        return generic_hits / max(1, total)
-
-    def _build_planner_prompt(self, intent: str) -> str:
-        return (
-            "You are a planning assistant. Extract a concrete action plan for the user's task.\n"
-            "Do NOT invent specific brands or people. Use only nouns present in the task or generic nouns.\n"
-            "Output STRICT JSON ONLY with keys: {\"domain\": string, \"items\": string[], \"subtasks\": string[]}.\n"
-            "- domain: one of: cleaning, study, cooking, beverage, laundry, dishes, hygiene, admin, workout, errand, generic.\n"
-            "- items: 2-6 generic items actually needed (e.g., bin, cloth, mug, kettle, pen, notebook).\n"
-            "- subtask names: 2-4 short labels describing parts of the task (e.g., clear surface, wipe, reset).\n"
-            f"Task: {intent}\n"
-            "Respond with JSON only."
-        )
-
-    def _build_steps_from_plan_prompt(self, intent: str, plan_json: str, fast: bool) -> str:
-        speed_note = "Keep between 6 and 9 steps." if fast else "Use 8–14 steps."
-        return (
-            "You create a VERY granular, activation-friendly checklist from the user's task and a simple plan.\n"
-            "Rules:\n"
-            "- First step = micro-activation (clear space, put phone away, place item).\n"
-            "- Use short imperative sentences (<= 50 chars).\n"
-            "- No times/durations (no minutes/seconds/timers).\n"
-            "- Use only nouns from the task or these plan 'items'; otherwise use generic nouns (tools, materials).\n"
-            "- Do NOT invent brands or people; no exclamation marks.\n"
-            f"- {speed_note}\n"
-            "- End beverages with 'Enjoy a sip'.\n"
-            "Output STRICT JSON ONLY with keys: {\"title\": string, \"description\": string, \"objectives\": string[], \"rewards\": string}.\n"
-            f"Task: {intent}\n"
-            f"Plan: {plan_json}\n"
-            "Respond with JSON only."
-        )
-
-    def _is_fast(self, fast_flag: Optional[bool]) -> bool:
-        env_fast = os.getenv("RQS_FAST")
-        if isinstance(fast_flag, bool):
-            return fast_flag
-        if isinstance(env_fast, str) and env_fast.strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-        return False
-
-    def _postprocess_objectives(self, intent: str, objectives: List[str]) -> List[str]:
-        text = (intent or "").lower()
-        beverage_words = ["coffee", "tea", "drink", "beverage", "water"]
-        is_beverage = any(w in text for w in beverage_words)
-        is_cleaning = any(k in text for k in ["tidy", "declutter", "organize", "clean", "wipe", "dust", "desk", "table", "counter"])
-        is_bed = any(w in text for w in ["make bed", "make the bed", "bed", "duvet", "pillow", "bedsheet", "bed sheet"]) and "bedroom" not in text
-        is_study = any(w in text for w in ["study", "homework", "assignment", "classwork", "read"]) or any(w in text for w in ["math", "english"]) 
-        is_math = any(w in text for w in ["math", "algebra", "geometry", "calculus", "statistics"]) and ("homework" in text or "math" in text)
-        is_english = any(w in text for w in ["english", "essay", "paper", "writing"]) and ("homework" in text or "english" in text)
-        cleaned: List[str] = []
-        for o in objectives:
-            s = str(o)
-            low = s.lower()
-            if is_beverage and "bite" in low:
-                s = s.replace("bite", "sip").replace("Bite", "Sip")
-            if is_cleaning and any(w in low for w in ["writing", "notebook", "paper", "page", "skim", "problem", "summary", "read"]):
-                # Replace study-ish bleed with cleaning-friendly phrasing
-                s = "Clear a small surface"
-            cleaned.append(s)
-        # De-duplicate while preserving order
-        seen = set()
-        unique: List[str] = []
-        for s in cleaned:
-            if s not in seen:
-                seen.add(s)
-                unique.append(s)
-        if is_bed:
-            return [
-                "Clear items off the bed",
-                "Shake out the sheets",
-                "Fit the bottom sheet",
-                "Smooth out wrinkles",
-                "Add the top sheet",
-                "Pull up blanket or duvet",
-                "Arrange pillows",
-                "Smooth the top layer",
-                "Mark this as done",
-            ]
-        # If study set looks too generic, replace with structured flow
-        generic_tokens = {"open the task", "open to the right page", "first problem", "next chunk", "save", "skim"}
-        too_generic = sum(1 for s in unique for t in generic_tokens if t in s.lower()) >= max(2, len(unique)//3)
-        if is_study and (too_generic or len(unique) < 6):
-            if is_math:
-                return [
-                    "Grab a pencil and notebook",
-                    "Clear a small space",
-                    "Take homework out",
-                    "Open to the right page",
-                    "Skim instructions",
-                    "Do the first problem",
-                    "Check answer quickly",
-                    "Do the next 2 problems",
-                    "Write a 1-sentence plan if stuck",
-                    "Save your work",
-                    "Put materials away",
-                    "Mark this as done",
-                ]
-            if is_english:
-                return [
-                    "Grab a pen and notebook",
-                    "Clear a small space",
-                    "Open the assignment",
-                    "Skim the prompt",
-                    "Write one starter sentence",
-                    "Draft the next small section",
-                    "Quick read and adjust",
-                    "Save your work",
-                    "Put materials away",
-                    "Mark this as done",
-                ]
-        return unique
+        return prompt_text
 
     def generate(self, intent: str, fast: Optional[bool] = None) -> Dict[str, object]:
         # Ensure server and model are available
@@ -486,28 +298,27 @@ class LocalLLMQuestGenerator:
             text = self._request(prompt, options={"temperature": 0.1 if is_fast else 0.2, "top_p": self.DEFAULT_TOP_P, "num_predict": 220 if is_fast else 350}, timeout_s=30 if is_fast else 60)
         # Best effort to parse JSON; if it fails, fallback to simple structure
         def _extract_json_object(s: str) -> Optional[Dict[str, Any]]:
-            # Direct parse first
+            # Try direct parse first
             try:
                 return json.loads(s)
             except Exception:
                 pass
-            # Find first balanced {...}
-            start = s.find('{')
-            while start != -1:
-                depth = 0
-                for i in range(start, len(s)):
-                    ch = s[i]
-                    if ch == '{':
-                        depth += 1
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0:
-                            candidate = s[start:i+1]
-                            try:
-                                return json.loads(candidate)
-                            except Exception:
-                                break
-                start = s.find('{', start + 1)
+            # Scan for JSON object candidates and use raw_decode to avoid brace-counting inside strings
+            decoder = json.JSONDecoder()
+            i = 0
+            length = len(s)
+            while i < length:
+                start = s.find('{', i)
+                if start == -1:
+                    break
+                try:
+                    obj, end = decoder.raw_decode(s, start)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    # Not a valid object at this position; continue searching
+                    pass
+                i = start + 1
             return None
 
         try:
@@ -559,26 +370,26 @@ class LocalLLMQuestGenerator:
         text = self._request(prompt, options=opts, timeout_s=30 if is_fast else 60)
         # Parse like in generate()
         def _extract_json_object(s: str) -> Optional[Dict[str, Any]]:
+            # Try direct parse first
             try:
                 return json.loads(s)
             except Exception:
                 pass
-            start = s.find('{')
-            while start != -1:
-                depth = 0
-                for i in range(start, len(s)):
-                    ch = s[i]
-                    if ch == '{':
-                        depth += 1
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0:
-                            candidate = s[start:i+1]
-                            try:
-                                return json.loads(candidate)
-                            except Exception:
-                                break
-                start = s.find('{', start + 1)
+            # Use raw_decode scanning from each '{'
+            decoder = json.JSONDecoder()
+            i = 0
+            length = len(s)
+            while i < length:
+                start = s.find('{', i)
+                if start == -1:
+                    break
+                try:
+                    obj, end = decoder.raw_decode(s, start)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+                i = start + 1
             return None
         try:
             data_obj = _extract_json_object(text) or {}

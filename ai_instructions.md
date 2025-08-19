@@ -31,9 +31,10 @@ Objectives Count and Structure
 - Do not prefix objectives with numbers or bullets.
 - Include 1–2 micro-activation steps (e.g., clear space, sip water).
 - Include a tidy wrap-up step near the end (put things away / save work).
-- Final step should confirm completion (e.g., Mark this as done).Generic Content Rules
-- Prefer generic nouns: materials, tools, notebook, paper, device.
-- If the task mentions domain items (e.g., “calculator”), you may include them.
+- Final step should confirm completion (e.g., Mark this as done).
+
+Generic Content Rules
+- Prefer generic nouns: materials, tools, notebook, paper, device.- If the task mentions domain items (e.g., “calculator”), you may include them.
 - If a step requires an item not stated by the user, use a generic noun (e.g., “tools,” “materials”) instead of guessing brands/types.
 
 Ambiguity Handling

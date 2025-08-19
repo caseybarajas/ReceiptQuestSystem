@@ -207,9 +207,11 @@ def print_markdown_document(printer, markdown_text: str) -> None:
 
         # Numbered list (1. 2. ...)
         if re.match(r"^\d+\.\s+", stripped):
-            # Preserve the existing number as prefix
-            number, rest = stripped.split(". ", 1)
-            prefix = f"{number}. "
+            # Preserve the existing number as prefix; parse robustly
+            num_match = re.match(r"^(\d+)\.", stripped)
+            number = num_match.group(1) if num_match else ""
+            rest = re.sub(r"^\d+\.\s*", "", stripped)
+            prefix = f"{number}. " if number else ""
             wrapper = textwrap.TextWrapper(
                 width=cols,
                 initial_indent=prefix,
